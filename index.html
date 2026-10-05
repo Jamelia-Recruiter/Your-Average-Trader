@@ -969,7 +969,7 @@
   const DERIV_WS = "wss://ws.binaryws.com/websockets/v3?app_id=1089";
 
   let socket = null;
-  let selectedSymbol = null;
+  let selectedSymbol = "frxXAUUSD"; // Default to explicit Deriv Gold symbol format
   let selectedTimeframe = 900; // 15m default
   let tradingStyle = "SCALP";
   let livePrice = null;
@@ -977,6 +977,7 @@
   let discoveredSymbols = [];
   let priceChart = null;
   let selectedImage = null;
+  let pingInterval = null;
 
   const quotes = [
     "Discipline beats emotion every time.",
@@ -1019,27 +1020,46 @@
     });
   });
 
-  // Deriv Connection
+  // Deriv Connection with Heartbeat Ping
   function connectDeriv() {
+    if (socket) {
+      socket.onclose = null;
+      socket.close();
+    }
+
+    document.getElementById("connectionDot").classList.remove("live");
+    document.getElementById("connectionText").textContent = "Connecting to Deriv...";
+
     socket = new WebSocket(DERIV_WS);
 
     socket.onopen = () => {
       document.getElementById("connectionDot").classList.add("live");
       document.getElementById("connectionText").textContent = "DERIV LIVE";
 
+      // Request symbols list
       socket.send(JSON.stringify({
         active_symbols: "brief",
-        req_id: 1
+        product_type: "basic"
       }));
+
+      // Keepalive ping loop every 30 seconds
+      if (pingInterval) clearInterval(pingInterval);
+      pingInterval = setInterval(() => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ ping: 1 }));
+        }
+      }, 30000);
     };
 
     socket.onclose = () => {
       document.getElementById("connectionDot").classList.remove("live");
-      document.getElementById("connectionText").textContent = "Disconnected";
+      document.getElementById("connectionText").textContent = "Disconnected — Reconnecting...";
+      if (pingInterval) clearInterval(pingInterval);
       setTimeout(connectDeriv, 3000);
     };
 
     socket.onerror = () => {
+      document.getElementById("connectionDot").classList.remove("live");
       document.getElementById("connectionText").textContent = "Connection Error";
     };
 
@@ -1053,13 +1073,13 @@
     if (data.msg_type === "active_symbols") {
       const raw = data.active_symbols || [];
       discoveredSymbols = raw.map(symbol => {
-        const code = String(symbol.underlying_symbol || symbol.symbol || "");
-        const name = String(symbol.underlying_symbol_name || symbol.display_name || code);
+        const code = String(symbol.symbol || "");
+        const name = String(symbol.display_name || code);
         const upper = code.toUpperCase();
         const lowerName = name.toLowerCase();
 
-        const gold = upper === "XAUUSD";
-        const volatility = (lowerName.includes("volatility") || (upper.includes("V") && (upper.includes("1HZ") || lowerName.includes("volatility"))));
+        const gold = upper.includes("XAU") || lowerName.includes("gold");
+        const volatility = lowerName.includes("volatility") || upper.includes("1HZ") || upper.startsWith("R_");
         const jump = lowerName.includes("jump") || upper.includes("JUMP");
 
         if (!gold && !volatility && !jump) return null;
@@ -1071,16 +1091,21 @@
         };
       }).filter(Boolean);
 
+      // Deduplicate symbols
       discoveredSymbols = Array.from(new Map(discoveredSymbols.map(item => [item.symbol, item])).values());
       discoveredSymbols.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
 
       renderSymbols();
 
-      if (!selectedSymbol && discoveredSymbols.length) {
-        const gold = discoveredSymbols.find(item => item.symbol === "XAUUSD");
-        selectedSymbol = gold ? gold.symbol : discoveredSymbols[0].symbol;
-        subscribeMarket();
+      // Ensure Gold is defaulted if available
+      const goldItem = discoveredSymbols.find(item => item.category === "Gold");
+      if (goldItem && (!selectedSymbol || !discoveredSymbols.some(s => s.symbol === selectedSymbol))) {
+        selectedSymbol = goldItem.symbol;
+      } else if (!selectedSymbol && discoveredSymbols.length) {
+        selectedSymbol = discoveredSymbols[0].symbol;
       }
+
+      subscribeMarket();
       return;
     }
 
@@ -1144,22 +1169,23 @@
     if (!socket || socket.readyState !== WebSocket.OPEN || !selectedSymbol) return;
 
     candles = [];
+    
+    // Clear previous tick and candle subscriptions cleanly
     socket.send(JSON.stringify({ forget_all: "ticks" }));
+    socket.send(JSON.stringify({ forget_all: "candles" }));
 
+    // Request historical candles for indicator calculations
     socket.send(JSON.stringify({
       ticks_history: selectedSymbol,
       end: "latest",
       count: 250,
       style: "candles",
-      granularity: selectedTimeframe,
-      subscribe: 1,
-      req_id: 10
+      granularity: selectedTimeframe
     }));
 
+    // Subscribe to live tick updates
     socket.send(JSON.stringify({
-      ticks: selectedSymbol,
-      subscribe: 1,
-      req_id: 11
+      ticks: selectedSymbol
     }));
 
     const market = discoveredSymbols.find(item => item.symbol === selectedSymbol);
@@ -1395,6 +1421,7 @@
     result.textContent = `AI VISION ANALYSIS REPORT\n\n• Trend: Bullish Structure Re-test\n• Support Zone: Validated at local swing low\n• Resistance: Clear upper boundary\n• Indicator State: MACD bullish crossover confirming momentum\n• Recommendation: Safe for scalp entry upon pullback confirmation.\n• Invalidation: Price break below structural support.`;
   });
 
+  // Initialize Connection on Load
   connectDeriv();
 </script>
 
